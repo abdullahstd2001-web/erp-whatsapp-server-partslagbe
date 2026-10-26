@@ -299,6 +299,10 @@ io.on('connection', (socket) => {
 
     socket.on('request_new_qr', async () => {
         console.log('Frontend requested a new QR Code dynamically...');
+        if (clientStatus === 'READY' || clientStatus === 'AUTHENTICATED') {
+            console.log('Client is already authenticated/ready. Ignoring request_new_qr.');
+            return;
+        }
         clientStatus = 'INITIALIZING';
         qrCodeData = null;
         io.emit('status', { status: clientStatus, qr: null });
@@ -307,7 +311,6 @@ io.on('connection', (socket) => {
             client = null;
         }
         await delay(1000);
-        await clearAuthFolder();
         initializeClient();
     });
 
@@ -435,20 +438,7 @@ io.on('connection', (socket) => {
             }));
             socket.emit('chat_messages_result', result);
         } catch (error) {
-            console.error("Caught detached frame or sync error:", error.message);
-            if (error.message.includes('detached') || error.message.includes('Session')) {
-                socket.emit('server_offline_warning', 'Engine re-syncing due to browser frame timeout.');
-                if (client) {
-                    clientStatus = 'INITIALIZING';
-                    io.emit('status', { status: 'INITIALIZING', qr: null });
-                    try { await client.destroy(); } catch (e) { console.warn('Destroy warn:', e.message); }
-                    client = null;
-                    setTimeout(async () => {
-                        await clearAuthFolder();
-                        initializeClient();
-                    }, 3000);
-                }
-            }
+            console.warn("Caught error in get_chat_messages:", error.message);
             socket.emit('chat_messages_result', { error: error.message });
         }
     });
@@ -771,8 +761,7 @@ const syncChats = async (targetEmitter) => {
         targetEmitter.emit('whatsapp_chats_loaded', formattedChats);
         console.log(`✅ Emitted ${formattedChats.length} chats instantly (zero-async).`);
 
-        // Background: resolve names + DPs for ALL chats without blocking the emit. We send the full array.
-        resolveTopAvatars(formattedChats, targetEmitter);
+        // Avatars and contact names are loaded lazily on-demand by frontend to prevent WhatsApp anti-scraping blocks
     } catch (err) {
         console.error('Error in syncChats:', err.message);
         handleDetachedFrameError(err);
@@ -782,55 +771,14 @@ const syncChats = async (targetEmitter) => {
 };
 
 async function handleDetachedFrameError(error) {
-    if (error && error.message && error.message.includes('detached Frame')) {
-        console.log("Robotic Guard: Detached frame detected. Re-initializing Puppeteer target session safely...");
-        clientStatus = 'INITIALIZING';
-        qrCodeData = null;
-        io.emit('status', { status: clientStatus, qr: null });
-        if (client) {
-            try {
-                await client.destroy();
-            } catch (err) {
-                console.error('Error destroying client:', err.message);
-            }
-            client = null;
-        }
-        initializeClient();
+    if (error && error.message) {
+        console.warn("Robotic Guard: Puppeteer frame notice (keeping client session alive):", error.message);
     }
 }
 
-// Background avatar resolution — runs AFTER the initial instant emit
+// Background avatar resolution (safe, non-destructive, lazy)
 const resolveTopAvatars = async (topChats, targetEmitter) => {
-    try {
-        if (!client || !client.info || clientStatus !== 'READY') return;
-        const updates = [];
-        for (const chatData of topChats) {
-            try {
-                const contact = await (async () => { try { return await client.getContactById(chatData.id); } catch (e) { return null; } })();
-                if (contact) {
-                    const resolvedName = contact.name || contact.pushname || chatData.name;
-                    const profilePic = await contact.getProfilePicUrl().catch(() => null);
-                    if (resolvedName !== chatData.name || profilePic) {
-                        updates.push({
-                            id: chatData.id,
-                            name: resolvedName,
-                            profilePic: profilePic || null
-                        });
-                    }
-                }
-                // Allow browser to breathe to avoid detached frame
-                await delay(100);
-            } catch (e) {
-                // Skip this contact silently
-            }
-        }
-        if (updates.length > 0) {
-            targetEmitter.emit('whatsapp_chat_updates', updates);
-            console.log(`🖼️  Background: resolved ${updates.length} avatars/names.`);
-        }
-    } catch (e) {
-        console.error('Background avatar resolve error:', e.message);
-    }
+    // Left as safe no-op. Frontend uses lazy loading for avatars.
 };
 
 // Debounced sync: prevents message_create from hammering syncChats on every message
@@ -851,10 +799,13 @@ let isInitializing = false;
 const initializeClient = async () => {
     const sessionPath = path.join(__dirname, 'whatsapp_session_data');
     if (fs.existsSync(sessionPath)) {
-        const lockFile = path.join(sessionPath, 'session', 'SingletonLock');
-        if (fs.existsSync(lockFile)) {
-            console.log('🔓 Found SingletonLock! Deleting to release folder lock...');
-            try { fs.unlinkSync(lockFile); } catch (e) { console.warn('Could not remove lock file'); }
+        const lockFiles = ['SingletonLock', 'SingletonCookie', 'SingletonSocket'];
+        for (const file of lockFiles) {
+            const p = path.join(sessionPath, 'session', file);
+            if (fs.existsSync(p)) {
+                console.log(`🔓 Found ${file}! Removing lock...`);
+                try { fs.unlinkSync(p); } catch (e) { }
+            }
         }
     }
 
@@ -897,10 +848,10 @@ const initializeClient = async () => {
             authStrategy: new LocalAuth({
                 dataPath: path.join(__dirname, 'whatsapp_session_data')
             }),
-            authTimeoutMs: 180000,
+            authTimeoutMs: 0, // Disable internal auth timeout so slow VPS initial indexing doesn't abort
             qrMaxRetries: 50,
-            takeoverOnConflict: false,
-            takeoverTimeoutMs: 0,
+            takeoverOnConflict: true, // Keep session active if conflict or phone ping occurs
+            takeoverTimeoutMs: 5000,
             bypassCSP: true,
             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
             puppeteer: {
@@ -913,7 +864,6 @@ const initializeClient = async () => {
                 bypassCSP: true,
                 userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
                 args: [
-                    '--headless',
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage',
@@ -923,6 +873,10 @@ const initializeClient = async () => {
                     '--disable-gpu',
                     '--enable-features=NetworkService,NetworkServiceInProcess',
                     '--disable-web-security',
+                    '--disable-extensions',
+                    '--disable-background-timer-throttling',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-renderer-backgrounding',
                     '--hide-scrollbars',
                     '--mute-audio'
                 ]
@@ -986,22 +940,13 @@ const initializeClient = async () => {
             io.emit('whatsapp_authenticated');
             io.emit('status', { status: clientStatus, qr: null });
 
-            // Safety net: if 'ready' doesn't fire within 90s after auth,
-            // the session is probably broken — clear it and force a fresh QR
+            // Keep session alive without deleting auth folder. Initial sync can take a few minutes on low RAM VPS.
             if (readyTimeoutId) clearTimeout(readyTimeoutId);
-            readyTimeoutId = setTimeout(async () => {
+            readyTimeoutId = setTimeout(() => {
                 if (clientStatus !== 'READY') {
-                    console.warn('⚠️ Ready event timed out 5m after auth. Clearing session and regenerating QR...');
-                    clientStatus = 'INITIALIZING';
-                    io.emit('status', { status: 'INITIALIZING', qr: null });
-                    try { if (client) { await client.destroy(); client = null; } } catch (e) { console.warn('Destroy warn:', e.message); }
-                    await delay(3000);
-                    const cleared = await clearAuthFolder();
-                    console.log(cleared ? '🗑️  Auth folder cleared.' : '⚠️  Auth folder could not be cleared.');
-                    await delay(1000);
-                    initializeClient();
+                    console.log('⏳ Account sync in progress in background... (keeping session intact)');
                 }
-            }, 300000); // 5 minutes timeout to accommodate slow syncing accounts
+            }, 60000);
         });
 
         client.on('ready', () => {
@@ -1178,15 +1123,21 @@ const initializeClient = async () => {
                 return;
             }
 
+            // Ignore NAVIGATION reloads to avoid killing active browser session
+            if (reason === 'NAVIGATION') {
+                console.log('ℹ️ Disconnect event due to NAVIGATION. Keeping client instance alive...');
+                return;
+            }
+
             clientStatus = 'DISCONNECTED';
             io.emit('status', { status: clientStatus, qr: null });
 
             // Auto-recovery only if logged out or permanently disconnected
-            console.log('🤖 Robotic watchdog: scheduling safe auto-reconnect in 90 seconds to avoid WhatsApp IP/rate limits and CPU spikes...');
+            console.log('🤖 Robotic watchdog: scheduling safe auto-reconnect in 60 seconds (preserving session files)...');
             try {
                 if (client) { await client.destroy().catch(() => { }); client = null; }
             } catch (e) { }
-            await delay(90000);
+            await delay(60000);
             console.log('🤖 Robotic watchdog: reinitializing client after safe delay...');
             initializeClient();
         });
