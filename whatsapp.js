@@ -899,17 +899,22 @@ const initializeClient = async () => {
             authStrategy: new LocalAuth({
                 dataPath: './whatsapp_session_data'
             }),
-            authTimeoutMs: 120000, // 2 minutes auth timeout
-            qrMaxRetries: 50, // Give plenty of time (15-20 mins) for QR scan without early dropout
+            authTimeoutMs: 180000,
+            qrMaxRetries: 50,
             takeoverOnConflict: false,
             takeoverTimeoutMs: 0,
+            webVersionCache: {
+                type: 'remote',
+                remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1018944111-alpha.html'
+            },
             puppeteer: {
                 executablePath: process.platform === 'win32'
                     ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
                     : (process.env.CHROME_PATH || '/usr/bin/chromium-browser' || '/usr/bin/chromium' || '/usr/bin/google-chrome'),
-                headless: true, // Use 'new' or true. DO NOT use false.
+                headless: true,
                 timeout: 120000,
                 defaultViewport: null,
+                userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
                 args: [
                     '--headless',
                     '--no-sandbox',
@@ -920,9 +925,7 @@ const initializeClient = async () => {
                     '--disable-extensions',
                     '--hide-scrollbars',
                     '--mute-audio',
-                    '--no-first-run',
-                    '--no-zygote',
-                    '--single-process'
+                    '--no-first-run'
                 ]
             }
         });
