@@ -1317,6 +1317,10 @@ const upsertFirestore = async (collection, docId, data) => {
     }
 };
 
+const readCollectionFromFirestore = async (_collection) => {
+    return [];
+};
+
 const syncChatsToFirestore = async () => {
     // Disabled due to puppeteer frame detached issue
     console.log('Skipping legacy syncChatsToFirestore');
@@ -2464,137 +2468,7 @@ app.get('/api/whatsapp/chats/:chatId/messages', async (req, res) => {
     }
 });
 
-const readCollectionFromFirestore = async (collection) => {
-    try {
-        const url = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents/${collection}?pageSize=1000`;
-        const response = await fetch(url);
-        if (!response.ok) {
-            return [];
-        }
-        const data = await response.json();
-        if (!data.documents) return [];
-
-        return data.documents.map(doc => {
-            const id = doc.name.split('/').pop();
-            const fields = doc.fields || {};
-            const item = { id };
-            for (const [key, val] of Object.entries(fields)) {
-                if (val.stringValue !== undefined) item[key] = val.stringValue;
-                else if (val.doubleValue !== undefined) item[key] = Number(val.doubleValue);
-                else if (val.integerValue !== undefined) item[key] = Number(val.integerValue);
-                else if (val.booleanValue !== undefined) item[key] = val.booleanValue;
-            }
-            return item;
-        });
-    } catch (e) {
-        return [];
-    }
-};
-
-const runRoboticEvaluation = async () => {
-    console.log('🤖 Starting Behavioral Robotic CRM evaluation...');
-    try {
-        const customers = await readCollectionFromFirestore('customers');
-        const invoices = await readCollectionFromFirestore('invoices');
-
-        const now = Date.now();
-        const msInDay = 24 * 60 * 60 * 1000;
-
-        for (const cust of customers) {
-            const custInvoices = invoices.filter(inv => inv.customerId === cust.id && inv.status !== 'DRAFT');
-            const outstandingBalance = custInvoices.reduce((sum, inv) => {
-                return sum + Math.max(0, (inv.grandTotal || 0) - (inv.amountPaid || 0));
-            }, 0);
-
-            if (outstandingBalance <= 0) continue;
-
-            const lastPaymentDate = cust.lastPaymentDate || cust.createdAt || now;
-            const daysSincePayment = Math.floor((now - new Date(lastPaymentDate).getTime()) / msInDay);
-
-            let robotStatus = 'NORMAL';
-            let tone = 'Soft';
-
-            const daysSinceLastReminder = cust.lastReminderSent ? Math.floor((now - cust.lastReminderSent) / msInDay) : null;
-            const hasPaidSinceReminder = cust.lastReminderSent && cust.lastPaymentDate && (new Date(cust.lastPaymentDate).getTime() > cust.lastReminderSent);
-
-            if (cust.lastReminderSent && !hasPaidSinceReminder) {
-                if (daysSinceLastReminder >= 10) {
-                    robotStatus = 'Late Penalty Applied';
-                    tone = 'Strict/Corporate';
-                } else if (daysSinceLastReminder >= 3) {
-                    robotStatus = '7-Day Soft Warning';
-                    tone = 'Soft';
-                } else {
-                    robotStatus = '15-Day Soft Reminder';
-                    tone = 'Soft';
-                }
-            } else {
-                if (daysSincePayment >= 22) {
-                    robotStatus = 'Late Penalty Applied';
-                    tone = 'Strict/Corporate';
-                } else if (daysSincePayment >= 19) {
-                    robotStatus = '3-Day Urgent Warning';
-                    tone = 'Strict/Corporate';
-                } else if (daysSincePayment >= 15) {
-                    robotStatus = '15-Day Soft Reminder';
-                    tone = 'Soft';
-                } else if (daysSincePayment >= 7) {
-                    robotStatus = '7-Day Soft Warning';
-                    tone = 'Soft';
-                }
-            }
-
-            if (robotStatus === 'Late Penalty Applied') {
-                if (!cust.latePenaltyLocked) {
-                    const penaltyAmount = Number((outstandingBalance * 0.01).toFixed(2));
-                    console.log(`🤖 Customer ${cust.firstName} overdue. Applying 1% monthly penalty: BDT ${penaltyAmount}`);
-
-                    const invNumber = `LF-PEN-${Date.now().toString().slice(-6)}`;
-                    await writeToFirestore('invoices', {
-                        companyId: cust.companyId || 'DEFAULT',
-                        customerId: cust.id,
-                        customerName: `${cust.firstName || ''} ${cust.lastName || ''}`.trim(),
-                        invoiceNumber: invNumber,
-                        invoiceDate: new Date().toISOString().split('T')[0],
-                        dueDate: new Date().toISOString().split('T')[0],
-                        currency: 'BDT',
-                        exchangeRate: 1,
-                        discount: 0,
-                        shippingCharges: 0,
-                        taxRate: 0,
-                        subTotal: penaltyAmount,
-                        taxAmount: 0,
-                        grandTotal: penaltyAmount,
-                        amountPaid: 0,
-                        status: 'UNPAID',
-                        customerNotes: 'Mandatory 1% Monthly Late Fee Penalty applied by CRM Robot. This is a locked late fee and must be paid.',
-                        createdAt: Date.now()
-                    });
-
-                    await updateFirestore('customers', cust.id, {
-                        latePenaltyLocked: true,
-                        dueStatus: 'LATE_PENALTY'
-                    });
-                }
-            }
-
-            const paymentHistoryScore = cust.paymentHistoryScore !== undefined ? cust.paymentHistoryScore : 80;
-            if (paymentHistoryScore < 50 && daysSincePayment >= 15) {
-                tone = 'Strict/Corporate';
-            }
-
-            await updateFirestore('customers', cust.id, {
-                daysSincePayment,
-                robotStatus,
-                assignedTemplateTone: tone,
-                outstandingBalance
-            });
-        }
-        console.log('🤖 Behavioral Robotic CRM evaluation completed successfully.');
-    } catch (e) {
-        console.error('🤖 CRM Robot failed:', e.message);
-    }
-};
+// WhatsApp Web automation backend forPartslagbe ERP
 
 app.post('/api/ai/generate', async (req, res) => {
     const { prompt, model } = req.body;
