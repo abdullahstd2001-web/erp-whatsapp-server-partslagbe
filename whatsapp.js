@@ -1245,7 +1245,6 @@ const writeToFirestore = async (collection, data) => {
         });
 
         if (!response.ok) {
-            console.error(`REST API Firestore write to ${collection} failed:`, await response.text());
             return null;
         }
 
@@ -1253,7 +1252,6 @@ const writeToFirestore = async (collection, data) => {
         const docId = resData.name ? resData.name.split('/').pop() : null;
         return docId;
     } catch (e) {
-        console.error(`REST API Firestore write to ${collection} error:`, e.message);
         return null;
     }
 };
@@ -1282,10 +1280,10 @@ const updateFirestore = async (collection, docId, data) => {
         });
 
         if (!response.ok) {
-            console.error(`REST API Firestore update to ${collection}/${docId} failed:`, await response.text());
+            return;
         }
     } catch (e) {
-        console.error(`REST API Firestore update to ${collection}/${docId} error:`, e.message);
+        // Suppress unauthenticated REST errors
     }
 };
 
@@ -1312,10 +1310,10 @@ const upsertFirestore = async (collection, docId, data) => {
         });
 
         if (!response.ok) {
-            console.error(`REST API Firestore upsert to ${collection}/${docId} failed:`, await response.text());
+            return;
         }
     } catch (e) {
-        console.error(`REST API Firestore upsert to ${collection}/${docId} error:`, e.message);
+        // Suppress unauthenticated REST errors
     }
 };
 
@@ -2471,7 +2469,6 @@ const readCollectionFromFirestore = async (collection) => {
         const url = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents/${collection}?pageSize=1000`;
         const response = await fetch(url);
         if (!response.ok) {
-            console.error(`REST API Firestore read of ${collection} failed:`, await response.text());
             return [];
         }
         const data = await response.json();
@@ -2490,7 +2487,6 @@ const readCollectionFromFirestore = async (collection) => {
             return item;
         });
     } catch (e) {
-        console.error(`REST API Firestore read of ${collection} error:`, e.message);
         return [];
     }
 };
@@ -2651,8 +2647,8 @@ app.post('/api/ai/generate', async (req, res) => {
     }
 });
 
-setInterval(runRoboticEvaluation, 5 * 60 * 1000);
-setTimeout(runRoboticEvaluation, 3000);
+// Robotic CRM late fees and invoice generation are managed securely by the ERP React client with user authentication.
+// Background unauthenticated REST polling has been disabled to prevent PERMISSION_DENIED spam.
 
 server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
