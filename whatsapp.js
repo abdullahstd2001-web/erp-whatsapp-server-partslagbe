@@ -899,23 +899,30 @@ const initializeClient = async () => {
             authStrategy: new LocalAuth({
                 dataPath: './whatsapp_session_data'
             }),
-            authTimeoutMs: 0, // 🔥 Disables the internal auth timeout completely
-            qrMaxRetries: 15,
+            authTimeoutMs: 120000, // 2 minutes auth timeout
+            qrMaxRetries: 50, // Give plenty of time (15-20 mins) for QR scan without early dropout
+            takeoverOnConflict: false,
+            takeoverTimeoutMs: 0,
             puppeteer: {
                 executablePath: process.platform === 'win32'
                     ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
                     : (process.env.CHROME_PATH || '/usr/bin/chromium-browser' || '/usr/bin/chromium' || '/usr/bin/google-chrome'),
                 headless: true, // Use 'new' or true. DO NOT use false.
-                timeout: 90000,
+                timeout: 120000,
+                defaultViewport: null,
                 args: [
-                    '--headless', // Forces headless mode directly in Chrome to avoid blank startup window
+                    '--headless',
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage',
                     '--disable-accelerated-2d-canvas',
                     '--disable-gpu',
+                    '--disable-extensions',
                     '--hide-scrollbars',
-                    '--mute-audio'
+                    '--mute-audio',
+                    '--no-first-run',
+                    '--no-zygote',
+                    '--single-process'
                 ]
             }
         });
@@ -955,20 +962,14 @@ const initializeClient = async () => {
             io.emit('whatsapp-qr-update', qr);
             io.emit('status', { status: clientStatus, qr: qrCodeData });
 
-            // Auto-destroy stale QR after 2 minutes if not scanned
+            // Cleanly maintain QR validity without prematurely killing the Chromium browser
             if (qrTimeout) clearTimeout(qrTimeout);
             qrTimeout = setTimeout(async () => {
                 if (clientStatus === 'QR_READY') {
-                    console.log('🤖 QR code expired (not scanned within 2 mins). Auto-destroying and regenerating...');
+                    console.log('🤖 QR scan timeout reached. Refreshing QR smoothly without wiping session...');
                     io.emit('qr-expired');
-                    try {
-                        if (client) { await client.destroy(); client = null; }
-                    } catch (e) { console.warn('QR timeout destroy:', e.message); }
-                    await delay(2000);
-                    await clearAuthFolder();
-                    initializeClient();
                 }
-            }, 120000); // 2 minutes
+            }, 300000); // 5 minutes validity
         });
 
         client.removeAllListeners('authenticated');
@@ -1161,13 +1162,20 @@ const initializeClient = async () => {
             io.emit('status', { status: clientStatus, qr: null });
         });
 
-        // 🤖 Robotic auto-reconnect on disconnect
+        // 🤖 Robotic auto-reconnect on genuine disconnect
         client.on('disconnected', async (reason) => {
+            console.log('🔌 Client disconnected event received with reason:', reason);
+
+            // If we are currently waiting for QR scan, do not tear down the client instance
+            if (clientStatus === 'QR_READY' && qrCodeData) {
+                console.log('ℹ️ Disconnect event received during QR rotation. Keeping client alive for next QR...');
+                return;
+            }
+
             clientStatus = 'DISCONNECTED';
-            console.log('🔌 Client disconnected:', reason);
             io.emit('status', { status: clientStatus, qr: null });
 
-            // Auto-recovery: destroy, wait, reinitialize
+            // Auto-recovery only if logged out or permanently disconnected
             console.log('🤖 Robotic watchdog: scheduling safe auto-reconnect in 90 seconds to avoid WhatsApp IP/rate limits and CPU spikes...');
             try {
                 if (client) { await client.destroy().catch(() => { }); client = null; }
