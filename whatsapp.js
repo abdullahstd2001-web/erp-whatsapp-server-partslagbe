@@ -900,7 +900,7 @@ const initializeClient = async () => {
                 dataPath: './whatsapp_session_data'
             }),
             authTimeoutMs: 0, // 🔥 Disables the internal auth timeout completely
-            qrMaxRetries: 10,
+            qrMaxRetries: 15,
             puppeteer: {
                 executablePath: process.platform === 'win32'
                     ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
@@ -1168,12 +1168,12 @@ const initializeClient = async () => {
             io.emit('status', { status: clientStatus, qr: null });
 
             // Auto-recovery: destroy, wait, reinitialize
-            console.log('🤖 Robotic watchdog: scheduling auto-reconnect in 5 seconds...');
+            console.log('🤖 Robotic watchdog: scheduling safe auto-reconnect in 90 seconds to avoid WhatsApp IP/rate limits and CPU spikes...');
             try {
                 if (client) { await client.destroy().catch(() => { }); client = null; }
             } catch (e) { }
-            await delay(5000);
-            console.log('🤖 Robotic watchdog: reinitializing client...');
+            await delay(90000);
+            console.log('🤖 Robotic watchdog: reinitializing client after safe delay...');
             initializeClient();
         });
 
