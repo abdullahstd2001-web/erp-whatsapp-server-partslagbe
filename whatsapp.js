@@ -881,19 +881,17 @@ const initializeClient = async () => {
         if (startupTimeout) clearTimeout(startupTimeout);
         startupTimeout = setTimeout(async () => {
             if (clientStatus === 'INITIALIZING') {
-                console.warn('⚠️ Startup hanging detected (no QR or Ready event received within 60s). Wiping auth session...');
+                console.warn('⚠️ Startup hanging detected (no QR or Ready event received within 180s on low RAM VPS). Restarting client...');
                 clientStatus = 'INITIALIZING';
                 io.emit('status', { status: 'INITIALIZING', qr: null });
                 if (client) {
                     try { await client.destroy(); } catch (e) { console.warn('Destroy warn:', e.message); }
                     client = null;
                 }
-                await delay(2000);
-                await clearAuthFolder();
-                console.log('🗑️ Dead session nuked. Restarting client for fresh QR...');
+                await delay(3000);
                 initializeClient();
             }
-        }, 60000);
+        }, 180000); // 180 seconds allowance for 1GB RAM VM
 
         client = new Client({
             authStrategy: new LocalAuth({
@@ -903,10 +901,6 @@ const initializeClient = async () => {
             qrMaxRetries: 50,
             takeoverOnConflict: false,
             takeoverTimeoutMs: 0,
-            webVersionCache: {
-                type: 'remote',
-                remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1018944111-alpha.html'
-            },
             puppeteer: {
                 executablePath: process.platform === 'win32'
                     ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
@@ -954,6 +948,10 @@ const initializeClient = async () => {
         });
 
         client.on('qr', (qr) => {
+            if (startupTimeout) {
+                clearTimeout(startupTimeout);
+                startupTimeout = null;
+            }
             qrCodeData = qr;
             clientStatus = 'QR_READY';
             console.log('\n=========================================');
