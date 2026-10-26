@@ -895,12 +895,14 @@ const initializeClient = async () => {
 
         client = new Client({
             authStrategy: new LocalAuth({
-                dataPath: './whatsapp_session_data'
+                dataPath: path.join(__dirname, 'whatsapp_session_data')
             }),
             authTimeoutMs: 180000,
             qrMaxRetries: 50,
             takeoverOnConflict: false,
             takeoverTimeoutMs: 0,
+            bypassCSP: true,
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
             puppeteer: {
                 executablePath: process.platform === 'win32'
                     ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
@@ -908,6 +910,7 @@ const initializeClient = async () => {
                 headless: true,
                 timeout: 120000,
                 defaultViewport: null,
+                bypassCSP: true,
                 userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
                 args: [
                     '--headless',
@@ -915,11 +918,13 @@ const initializeClient = async () => {
                     '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage',
                     '--disable-accelerated-2d-canvas',
+                    '--no-first-run',
+                    '--no-zygote',
                     '--disable-gpu',
-                    '--disable-extensions',
+                    '--enable-features=NetworkService,NetworkServiceInProcess',
+                    '--disable-web-security',
                     '--hide-scrollbars',
-                    '--mute-audio',
-                    '--no-first-run'
+                    '--mute-audio'
                 ]
             }
         });
