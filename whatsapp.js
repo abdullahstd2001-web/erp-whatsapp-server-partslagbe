@@ -902,7 +902,9 @@ const initializeClient = async () => {
             authTimeoutMs: 0, // 🔥 Disables the internal auth timeout completely
             qrMaxRetries: 10,
             puppeteer: {
-                executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+                executablePath: process.platform === 'win32'
+                    ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
+                    : (process.env.CHROME_PATH || '/usr/bin/chromium-browser' || '/usr/bin/chromium' || '/usr/bin/google-chrome'),
                 headless: true, // Use 'new' or true. DO NOT use false.
                 timeout: 90000,
                 args: [
@@ -1386,8 +1388,9 @@ app.post('/api/whatsapp/send', async (req, res) => {
     try {
         const chatId = phone.includes('@') ? phone : (() => {
             let formattedPhone = phone.replace(/\D/g, '');
-            if (formattedPhone.startsWith('01')) {
-                formattedPhone = '88' + formattedPhone;
+            // Only prepend 880 if it's a local Bangladeshi 11-digit mobile starting with 01
+            if (formattedPhone.startsWith('01') && formattedPhone.length === 11) {
+                formattedPhone = '880' + formattedPhone.substring(1);
             }
             return `${formattedPhone}@c.us`;
         })();
@@ -1451,8 +1454,8 @@ app.post('/api/whatsapp/send-media', async (req, res) => {
     try {
         const chatId = phone.includes('@') ? phone : (() => {
             let formattedPhone = phone.replace(/\D/g, '');
-            if (formattedPhone.startsWith('01')) {
-                formattedPhone = '88' + formattedPhone;
+            if (formattedPhone.startsWith('01') && formattedPhone.length === 11) {
+                formattedPhone = '880' + formattedPhone.substring(1);
             }
             return `${formattedPhone}@c.us`;
         })();
