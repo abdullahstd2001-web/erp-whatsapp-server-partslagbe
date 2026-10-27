@@ -2173,30 +2173,32 @@ app.get('/api/calendar/holidays', async (req, res) => {
     }
 });
 
-app.post('/api/whatsapp/broadcast', async (req, res) => {
-    if (clientStatus !== 'READY') {
-        return res.status(400).json({ error: 'WhatsApp client is not ready. Status: ' + clientStatus });
-    }
+// =========================================================================
+// 🚀 HUMAN-LIKE BULK MESSAGING DISPATCH ENGINE (Anti-Ban & Anti-Rate-Limit)
+// =========================================================================
+const processBulkMessageDispatch = async (payload) => {
+    const { targetCustomerIds, targetCustomers, recipients, origin, message, eventName, campaignType } = payload;
+    
+    // 1. Dynamic Wave Pattern (Base delay in seconds)
+    const wavePattern = [15, 20, 25, 25, 20, 15];
+    let sentCount = 0;
 
-    const { targetCustomerIds, targetCustomers, origin, message, eventName, campaignType } = req.body;
+    const customers = await readCollectionFromFirestore('customers').catch(() => []);
+    const leads = await readCollectionFromFirestore('unlisted_leads').catch(() => []);
+    const clientOrigin = origin || 'http://localhost:5173';
 
-    if ((!Array.isArray(targetCustomerIds) && !Array.isArray(targetCustomers)) || !message) {
-        return res.status(400).json({ error: 'targetCustomerIds/targetCustomers and a message template are required.' });
-    }
-
-    // Respond immediately to avoid timeout
-    res.json({ success: true, message: 'Broadcast initiated in background.' });
-
-    try {
-        const customers = await readCollectionFromFirestore('customers');
-        const leads = await readCollectionFromFirestore('unlisted_leads');
-        const clientOrigin = origin || 'http://localhost:5173';
+    // Normalize targets to an iterable list
+    let itemsToProcess = [];
+    if (Array.isArray(recipients) && recipients.length > 0) {
+        itemsToProcess = recipients.map(r => ({
+            id: r.id || r.phone,
+            phone: r.phone,
+            customMessage: r.message,
+            rawCustomer: r
+        }));
+    } else {
         const targetIds = targetCustomerIds || (targetCustomers ? targetCustomers.map(c => c.id) : []);
-
-        for (let i = 0; i < targetIds.length; i++) {
-            const targetId = targetIds[i];
-
-            // Try to find customer from provided targetCustomers, otherwise fallback to DB
+        itemsToProcess = targetIds.map(targetId => {
             let customer = null;
             if (targetCustomers && targetCustomers.length > 0) {
                 customer = targetCustomers.find(c => c.id === targetId);
@@ -2204,103 +2206,217 @@ app.post('/api/whatsapp/broadcast', async (req, res) => {
             if (!customer) {
                 customer = customers.find(c => c.id === targetId) || leads.find(l => l.id === targetId);
             }
+            return {
+                id: targetId,
+                phone: customer?.phone,
+                rawCustomer: customer
+            };
+        });
+    }
 
-            if (!customer) {
-                console.log(`Target customer/lead with ID ${targetId} not found.`);
-                continue;
-            }
+    console.log(`\n========================================================`);
+    console.log(`🚀 [Human Bulk Dispatcher] Initialized queue of ${itemsToProcess.length} recipients.`);
+    console.log(`🛡️  Strategy: Wave Delays (12-29s) + Micro Breaks (60-90s) + Macro Breaks (3-5m) + Typing Sim (3-7s)`);
+    console.log(`========================================================\n`);
 
-            if (!customer.phone) {
-                console.log(`Customer ${targetId} has no phone number.`);
-                continue;
-            }
+    for (let i = 0; i < itemsToProcess.length; i++) {
+        const item = itemsToProcess[i];
+        const customer = item.rawCustomer;
 
-            let formattedPhone = customer.phone.replace(/\D/g, '');
-            if (formattedPhone.startsWith('01')) formattedPhone = '88' + formattedPhone;
-            const chatId = `${formattedPhone}@c.us`;
+        if (!item.phone) {
+            console.warn(`⚠️ [Bulk Dispatch] Recipient item ${i + 1} has no valid phone number. Skipping...`);
+            continue;
+        }
 
-            // Format parameters
+        let formattedPhone = item.phone.replace(/\D/g, '');
+        if (formattedPhone.startsWith('01') && formattedPhone.length === 11) {
+            formattedPhone = '880' + formattedPhone.substring(1);
+        } else if (formattedPhone.startsWith('01')) {
+            formattedPhone = '88' + formattedPhone;
+        }
+        const chatId = `${formattedPhone}@c.us`;
+
+        // Format message text
+        let finalMsg = item.customMessage || message || '';
+        if (customer) {
             const shopName = customer.businessName || customer.companyName || `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || 'Valued Customer';
             const lastDate = customer.lastPaymentDate ? new Date(customer.lastPaymentDate).toLocaleDateString() : 'N/A';
             const evtName = eventName || 'Special Occasion';
-
-            // Determine if listed or unlisted
-            const isUnlisted = leads.some(l => l.id === targetId) || (!customer.firstName && !customer.email && customer.googlePlaceId);
+            const isUnlisted = leads.some(l => l.id === item.id) || (!customer.firstName && !customer.email && customer.googlePlaceId);
             const link = isUnlisted ? '' : `${clientOrigin}/portal/${customer.portalHash || customer.uniqueToken || customer.id}`;
 
-            // Variable replacement
-            let finalMsg = message
+            finalMsg = finalMsg
                 .replace(/\[Shop Name\]/g, shopName)
                 .replace(/\[Last Date\]/g, lastDate)
                 .replace(/\[Event Name\]/g, evtName)
                 .replace(/\[Link\]/g, link)
                 .replace(/\[Portal Link\]/g, link);
 
-            // Strip trailing portal link labels if link is empty (unlisted leads)
             if (isUnlisted) {
                 finalMsg = finalMsg
                     .replace(/পোর্টাল লিংক:\s*$/gm, '')
                     .replace(/Link:\s*$/gm, '')
                     .replace(/\n\s*$/, '');
             }
+        }
 
-            // Dynamic text hashing to evade anti-spam
-            const hash = Date.now().toString(36);
-            finalMsg = `${finalMsg}\n\n[Ref: ${hash}]`;
+        // Dynamic text hashing to evade automated hash fingerprinting
+        const hash = Date.now().toString(36);
+        finalMsg = `${finalMsg}\n\n[Ref: ${hash}]`;
 
-            const sentMsg = await client.sendMessage(chatId, finalMsg);
-            console.log(`Broadcast sent to ${customer.phone}`);
+        // 4. TYPING SIMULATION (Simulate human presence and typing before sending)
+        console.log(`\n--------------------------------------------------------`);
+        console.log(`📤 Preparing message ${i + 1}/${itemsToProcess.length} for ${formattedPhone}...`);
+        let chatInstance = null;
+        try {
+            console.log(`🟢 [Presence] Sending online presence...`);
+            await client.sendPresenceAvailable().catch(() => {});
 
-            // Update last reminder date in Firestore
-            const collectionName = isUnlisted ? 'unlisted_leads' : 'customers';
-            const updateData = { lastReminderSent: Date.now() };
-            const todayStr = new Date().toISOString().split('T')[0];
-
-            if (campaignType === 'stock_update') {
-                updateData.lastStockUpdateSentDate = todayStr;
-            } else if (campaignType === 'event_wish') {
-                updateData.lastEventWishSentDate = todayStr;
+            chatInstance = await client.getChatById(chatId).catch(() => null);
+            if (chatInstance) {
+                console.log(`✍️  [Typing Simulation] Sending typing state to ${chatId}...`);
+                await chatInstance.sendStateTyping().catch(() => {});
             }
-            updateData.lastMessageSentDate = todayStr;
-            await updateFirestore(collectionName, targetId, updateData);
+
+            // Simulate human thinking & typing duration: 3 to 7 seconds
+            const typingDurationSec = Math.floor(Math.random() * (7 - 3 + 1)) + 3;
+            console.log(`⏳ [Typing Simulation] Simulating human typing for ${typingDurationSec} seconds before dispatch...`);
+            await delay(typingDurationSec * 1000);
+        } catch (simErr) {
+            console.warn(`⚠️ [Typing Simulation] Notice for ${chatId}:`, simErr.message);
+        }
+
+        // Execute message dispatch
+        try {
+            const sentMsg = await client.sendMessage(chatId, finalMsg);
+            sentCount++;
+            console.log(`✅ [Dispatched #${sentCount}] Message sent successfully to ${formattedPhone} (Ref: ${hash})`);
+
+            // Clear typing state after send
+            if (chatInstance) {
+                chatInstance.clearState().catch(() => {});
+            }
+
+            // Update recipient metadata in Firestore if applicable
+            if (customer && item.id) {
+                const isUnlisted = leads.some(l => l.id === item.id) || (!customer.firstName && !customer.email && customer.googlePlaceId);
+                const collectionName = isUnlisted ? 'unlisted_leads' : 'customers';
+                const updateData = { lastReminderSent: Date.now() };
+                const todayStr = new Date().toISOString().split('T')[0];
+
+                if (campaignType === 'stock_update') {
+                    updateData.lastStockUpdateSentDate = todayStr;
+                } else if (campaignType === 'event_wish') {
+                    updateData.lastEventWishSentDate = todayStr;
+                }
+                updateData.lastMessageSentDate = todayStr;
+                updateFirestore(collectionName, item.id, updateData).catch(() => {});
+            }
 
             // Write to messages collection in Firestore
-            await writeToFirestore('messages', {
+            writeToFirestore('messages', {
                 id: sentMsg.id.id,
                 threadId: chatId,
                 body: finalMsg,
                 fromMe: true,
                 timestamp: Date.now(),
                 companyId: 'DEFAULT'
-            });
+            }).catch(() => {});
 
-            // Update thread in Firestore for broadcast sent message
-            try {
-                const chat = await client.getChatById(chatId);
-                await upsertFirestore('whatsapp_threads', chatId, {
+            // Update thread in Firestore
+            if (chatInstance) {
+                upsertFirestore('whatsapp_threads', chatId, {
                     id: chatId,
-                    name: chat.name || chat.id.user || '',
+                    name: chatInstance.name || chatInstance.id.user || '',
                     unreadCount: 0,
                     timestamp: Date.now(),
                     lastMessage: finalMsg,
-                    isGroup: chat.isGroup || false,
+                    isGroup: chatInstance.isGroup || false,
                     companyId: 'DEFAULT'
-                });
-            } catch (err) {
-                // Ignore thread update error
+                }).catch(() => {});
             }
+        } catch (sendErr) {
+            console.error(`❌ [Bulk Dispatch Error] Failed to send message to ${chatId}:`, sendErr.message);
+        }
 
-            // Anti-ban delay
-            if (i < targetIds.length - 1) {
-                const waitTime = Math.floor(Math.random() * 3000) + 2000;
-                console.log(`Waiting ${waitTime}ms before next broadcast...`);
-                await delay(waitTime);
+        // Break & Delay Scheduling (Only if more messages remain in queue)
+        if (i < itemsToProcess.length - 1) {
+            // 3. MACRO BREAKS (Every 50 messages)
+            if (sentCount > 0 && sentCount % 50 === 0) {
+                const macroBreakSec = Math.floor(Math.random() * (300 - 180 + 1)) + 180; // 180 to 300 seconds (3-5 minutes)
+                console.log(`\n🛑 ========================================================`);
+                console.log(`🛑 [MACRO BREAK] 50-Message milestone reached (${sentCount} sent)!`);
+                console.log(`🛑 Taking deep rest break for ${macroBreakSec}s (${(macroBreakSec / 60).toFixed(1)} mins) to prevent WhatsApp bans & rate limits...`);
+                console.log(`🛑 ========================================================\n`);
+                await delay(macroBreakSec * 1000);
+            }
+            // 2. MICRO BREAKS (Every 10 messages, but excluding every 50th)
+            else if (sentCount > 0 && sentCount % 10 === 0) {
+                const microBreakSec = Math.floor(Math.random() * (90 - 60 + 1)) + 60; // 60 to 90 seconds (1-1.5 minutes)
+                console.log(`\n☕ ========================================================`);
+                console.log(`☕ [MICRO BREAK] 10-Message batch reached (${sentCount} total sent)!`);
+                console.log(`☕ Taking short rest break for ${microBreakSec}s (${(microBreakSec / 60).toFixed(1)} mins)...`);
+                console.log(`☕ ========================================================\n`);
+                await delay(microBreakSec * 1000);
+            }
+            // 1. DYNAMIC WAVE DELAY WITH JITTER (Between individual messages)
+            else {
+                // Cycle through base delay pattern [15, 20, 25, 25, 20, 15]
+                const waveIndex = (sentCount - 1) % wavePattern.length;
+                const baseDelaySec = wavePattern[waveIndex];
+
+                // Random jitter of -3 to +4 seconds
+                const jitterSec = Math.floor(Math.random() * (4 - (-3) + 1)) + (-3); // -3, -2, -1, 0, 1, 2, 3, 4
+                const finalDelaySec = Math.max(5, baseDelaySec + jitterSec);
+
+                console.log(`🌊 [Wave Delay] Message #${sentCount} sent. Base delay: ${baseDelaySec}s | Jitter: ${jitterSec >= 0 ? '+' : ''}${jitterSec}s => Next message in ${finalDelaySec}s...`);
+                await delay(finalDelaySec * 1000);
             }
         }
-        console.log('Broadcast complete.');
-    } catch (e) {
-        console.error('Broadcast loop failed:', e.message);
     }
+
+    console.log(`\n========================================================`);
+    console.log(`🎉 [Bulk Dispatch Complete] Finished processing all ${itemsToProcess.length} items. Total dispatched: ${sentCount}.`);
+    console.log(`========================================================\n`);
+};
+
+app.post('/api/whatsapp/broadcast', async (req, res) => {
+    if (clientStatus !== 'READY') {
+        return res.status(400).json({ error: 'WhatsApp client is not ready. Status: ' + clientStatus });
+    }
+
+    const { targetCustomerIds, targetCustomers, recipients, message } = req.body;
+    if ((!Array.isArray(targetCustomerIds) && !Array.isArray(targetCustomers) && !Array.isArray(recipients)) || (!message && !recipients)) {
+        return res.status(400).json({ error: 'targetCustomerIds/targetCustomers/recipients and a message template are required.' });
+    }
+
+    // Respond immediately to avoid HTTP timeout
+    res.json({ success: true, message: 'Human-like bulk dispatch initiated in background.' });
+
+    processBulkMessageDispatch(req.body).catch(e => {
+        console.error('Broadcast processing exception:', e.message);
+    });
+});
+
+// Alias endpoints for bulk sending
+app.post('/api/whatsapp/bulk', async (req, res) => {
+    if (clientStatus !== 'READY') {
+        return res.status(400).json({ error: 'WhatsApp client is not ready. Status: ' + clientStatus });
+    }
+    res.json({ success: true, message: 'Human-like bulk dispatch initiated in background.' });
+    processBulkMessageDispatch(req.body).catch(e => {
+        console.error('Bulk dispatch processing exception:', e.message);
+    });
+});
+
+app.post('/api/whatsapp/send-bulk', async (req, res) => {
+    if (clientStatus !== 'READY') {
+        return res.status(400).json({ error: 'WhatsApp client is not ready. Status: ' + clientStatus });
+    }
+    res.json({ success: true, message: 'Human-like bulk dispatch initiated in background.' });
+    processBulkMessageDispatch(req.body).catch(e => {
+        console.error('Bulk dispatch processing exception:', e.message);
+    });
 });
 
 app.post('/api/whatsapp/logout', async (req, res) => {
