@@ -228,74 +228,7 @@ io.on('connection', (socket) => {
         initializeClient();
     });
 
-    socket.on('whatsapp_get_messages', async (chatId) => {
-        if (!client || clientStatus !== 'READY') return;
-        try {
-            const chat = await client.getChatById(chatId);
-            const msgs = await chat.fetchMessages({ limit: 1000 }).catch(() => []);
-            for (const msg of msgs) {
-                let resolvedBody = msg.body || '';
-                if (!resolvedBody && msg.hasMedia) {
-                    if (msg.type === 'image') resolvedBody = '📷 Photo';
-                    else if (msg.type === 'video') resolvedBody = '📹 Video';
-                    else if (msg.type === 'document') resolvedBody = '📄 Document';
-                    else if (msg.type === 'audio' || msg.type === 'ptt') resolvedBody = '🎵 Audio';
-                    else if (msg.type === 'call_log') resolvedBody = '📞 Call Log';
-                    else resolvedBody = 'Media';
-                }
 
-                const payload = {
-                    id: msg.id.id,
-                    threadId: msg.fromMe ? msg.to : msg.from,
-                    body: resolvedBody,
-                    fromMe: msg.fromMe,
-                    timestamp: (msg.timestamp || 0) * 1000,
-                    companyId: 'DEFAULT',
-                    type: msg.type || 'chat',
-                    hasMedia: msg.hasMedia,
-                    mimetype: msg.mimetype || null,
-                    filename: msg.filename || null
-                };
-                upsertFirestore('messages', msg.id.id, payload).catch(() => {});
-            }
-        } catch (e) {
-            console.error('Failed to get messages via socket:', e.message);
-        }
-    });
-
-    socket.on('fetch_earlier_messages', async ({ chatId, limit }) => {
-        if (!client || clientStatus !== 'READY') return;
-        try {
-            const chat = await client.getChatById(chatId);
-            const msgs = await chat.fetchMessages({ limit: limit || 1000 }).catch(() => []);
-            for (const msg of msgs) {
-                let resolvedBody = msg.body || '';
-                if (!resolvedBody && msg.hasMedia) {
-                    if (msg.type === 'image') resolvedBody = '📷 Photo';
-                    else if (msg.type === 'video') resolvedBody = '📹 Video';
-                    else if (msg.type === 'document') resolvedBody = '📄 Document';
-                    else if (msg.type === 'audio' || msg.type === 'ptt') resolvedBody = '🎵 Audio';
-                    else if (msg.type === 'call_log') resolvedBody = '📞 Call Log';
-                    else resolvedBody = 'Media';
-                }
-                const payload = {
-                    id: msg.id.id,
-                    threadId: msg.fromMe ? msg.to : msg.from,
-                    body: resolvedBody,
-                    fromMe: msg.fromMe,
-                    timestamp: (msg.timestamp || 0) * 1000,
-                    companyId: 'DEFAULT',
-                    type: msg.type || 'chat',
-                    hasMedia: msg.hasMedia,
-                    mimetype: msg.mimetype || null,
-                    filename: msg.filename || null
-                };
-                upsertFirestore('messages', msg.id.id, payload).catch(() => {});
-            }
-        } catch (e) {
-            console.error('Failed to fetch earlier messages via socket:', e.message);
-        }
-    });
 
     socket.on('request_new_qr', async () => {
         console.log('Frontend requested a new QR Code dynamically...');
@@ -329,21 +262,28 @@ io.on('connection', (socket) => {
 
     socket.on('whatsapp_get_messages', async (chatId) => {
         try {
-            console.log(`Fetching messages for chat: ${chatId}`);
+            console.log(`Fetching messages (chunked limit: 20) for chat: ${chatId}`);
             if (!client || !client.info || clientStatus !== 'READY') {
                 socket.emit('messages_loaded', []);
                 return;
             }
             const chat = await client.getChatById(chatId);
-            const messages = await (async () => { try { return await chat.fetchMessages({ limit: 1000 }); } catch (e) { return []; } })();
+            const messages = await (async () => {
+                try {
+                    return await chat.fetchMessages({ limit: 20 });
+                } catch (e) {
+                    console.warn(`Safe notice: fetchMessages error for ${chatId}:`, e.message);
+                    return [];
+                }
+            })();
 
-            const processedMessages = await Promise.all(messages.map(async (msg) => {
+            const processedMessages = messages.map((msg) => {
                 let type = msg.type || 'chat';
 
                 return {
                     id: msg.id._serialized,
                     threadId: chatId,
-                    body: msg.body || 'Media',
+                    body: msg.body || (msg.hasMedia ? 'Media' : ''),
                     fromMe: msg.fromMe,
                     timestamp: (msg.timestamp || 0) * 1000,
                     type: type,
@@ -355,7 +295,7 @@ io.on('connection', (socket) => {
                     mediaMimeType: null,
                     status: (msg.ack || 0) >= 2 ? 'read' : 'sent'
                 };
-            }));
+            });
 
             socket.emit('messages_loaded', processedMessages);
         } catch (error) {
@@ -372,7 +312,7 @@ io.on('connection', (socket) => {
             if (!msg) {
                 const chat = await client.getChatById(chatId).catch(() => null);
                 if (chat) {
-                    const messages = await (async () => { try { return await chat.fetchMessages({ limit: 1000 }); } catch (e) { return []; } })();
+                    const messages = await (async () => { try { return await chat.fetchMessages({ limit: 20 }); } catch (e) { return []; } })();
                     msg = messages.find(m => m.id._serialized === messageId || m.id.id === messageId);
                 }
             }
@@ -422,7 +362,13 @@ io.on('connection', (socket) => {
                 return;
             }
             const chat = await client.getChatById(chatId);
-            const messages = await (async () => { try { return await chat.fetchMessages({ limit: 1000 }); } catch (e) { return []; } })();
+            const messages = await (async () => {
+                try {
+                    return await chat.fetchMessages({ limit: 20 });
+                } catch (e) {
+                    return [];
+                }
+            })();
             const result = messages.map((msg) => ({
                 id: msg.id._serialized,
                 threadId: chatId,
@@ -450,7 +396,13 @@ io.on('connection', (socket) => {
                 return;
             }
             const chat = await client.getChatById(chatId);
-            const messages = await (async () => { try { return await chat.fetchMessages({ limit: limit || 1000 }); } catch (e) { return []; } })();
+            const messages = await (async () => {
+                try {
+                    return await chat.fetchMessages({ limit: limit || 20 });
+                } catch (e) {
+                    return [];
+                }
+            })();
             const result = messages.map((msg) => ({
                 id: msg.id._serialized,
                 threadId: chatId,
@@ -705,18 +657,37 @@ const syncChats = async (targetEmitter) => {
             console.warn('⚠️ syncChats skipped: pupPage is closed or detached.');
             return;
         }
-        console.log('⚡ Syncing chats (lightweight, zero-async mapping)...');
-        const allChats = await client.getChats();
+        console.log('⚡ Syncing top 20 chats (chunked lazy-loading for low-RAM VPS)...');
+
+        let allChats = [];
+        try {
+            allChats = await client.getChats();
+        } catch (getChatsErr) {
+            if (
+                getChatsErr.message && (
+                    getChatsErr.message.includes('Execution context was destroyed') ||
+                    getChatsErr.message.includes('most likely because of a navigation') ||
+                    getChatsErr.message.includes('detached Frame')
+                )
+            ) {
+                console.warn('⚠️ Safe notice: Post-navigation context notice during getChats. Retrying in 3s...');
+                await delay(3000);
+                if (client && clientStatus === 'READY') {
+                    allChats = await client.getChats().catch(() => []);
+                }
+            } else {
+                throw getChatsErr;
+            }
+        }
 
         // Pure synchronous mapping — NO async calls inside the loop
-        const formattedChats = allChats
+        const formattedChats = (allChats || [])
             .filter(chat => {
                 if (!chat || !chat.id || !chat.id._serialized) return false;
                 if (chat.id._serialized.includes('@broadcast') || chat.id._serialized.includes('status@broadcast')) return false;
                 return true;
             })
             .map(chat => {
-                // Extract last message from pre-loaded chat object (no async fetch)
                 let lastMsgBody = '';
                 let lastMsgType = 'chat';
                 const lm = chat.lastMessage;
@@ -756,12 +727,13 @@ const syncChats = async (targetEmitter) => {
 
         // Sort newest first
         formattedChats.sort((a, b) => b.timestamp - a.timestamp);
-        cachedChats = formattedChats; // Cache for new socket connections
 
-        targetEmitter.emit('whatsapp_chats_loaded', formattedChats);
-        console.log(`✅ Emitted ${formattedChats.length} chats instantly (zero-async).`);
+        // Fetch only the top 20 recent chat summaries (Chunked architecture for low-RAM VPS)
+        const top20Chats = formattedChats.slice(0, 20);
+        cachedChats = top20Chats; // Cache for new socket connections
 
-        // Avatars and contact names are loaded lazily on-demand by frontend to prevent WhatsApp anti-scraping blocks
+        targetEmitter.emit('whatsapp_chats_loaded', top20Chats);
+        console.log(`✅ Emitted top ${top20Chats.length} chats instantly (chunked, zero-async).`);
     } catch (err) {
         console.error('Error in syncChats:', err.message);
         handleDetachedFrameError(err);
@@ -772,7 +744,16 @@ const syncChats = async (targetEmitter) => {
 
 async function handleDetachedFrameError(error) {
     if (error && error.message) {
-        console.warn("Robotic Guard: Puppeteer frame notice (keeping client session alive):", error.message);
+        if (
+            error.message.includes('Execution context was destroyed') ||
+            error.message.includes('most likely because of a navigation') ||
+            error.message.includes('detached Frame') ||
+            error.message.includes('Protocol error')
+        ) {
+            console.warn("Robotic Guard: Puppeteer navigation/frame notice safely ignored (keeping client session alive):", error.message);
+            return;
+        }
+        console.warn("Robotic Guard: Puppeteer notice:", error.message);
     }
 }
 
@@ -832,7 +813,7 @@ const initializeClient = async () => {
         if (startupTimeout) clearTimeout(startupTimeout);
         startupTimeout = setTimeout(async () => {
             if (clientStatus === 'INITIALIZING') {
-                console.warn('⚠️ Startup hanging detected (no QR or Ready event received within 180s on low RAM VPS). Restarting client...');
+                console.warn('⚠️ Startup hanging detected (no QR or Ready event received within 11m on low RAM VPS). Restarting client...');
                 clientStatus = 'INITIALIZING';
                 io.emit('status', { status: 'INITIALIZING', qr: null });
                 if (client) {
@@ -842,14 +823,14 @@ const initializeClient = async () => {
                 await delay(3000);
                 initializeClient();
             }
-        }, 180000); // 180 seconds allowance for 1GB RAM VM
+        }, 660000); // 11 minutes allowance for 1GB RAM VM
 
         client = new Client({
             authStrategy: new LocalAuth({
                 dataPath: path.join(__dirname, 'whatsapp_session_data')
             }),
-            authTimeoutMs: 0, // Disable internal auth timeout so slow VPS initial indexing doesn't abort
-            qrMaxRetries: 50,
+            authTimeoutMs: 0, // completely disables auth timeout so it can take all the time it needs to sync
+            qrMaxRetries: 90,
             takeoverOnConflict: true, // Keep session active if conflict or phone ping occurs
             takeoverTimeoutMs: 5000,
             bypassCSP: true,
@@ -859,7 +840,8 @@ const initializeClient = async () => {
                     ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
                     : (process.env.CHROME_PATH || '/usr/bin/chromium-browser' || '/usr/bin/chromium' || '/usr/bin/google-chrome'),
                 headless: true,
-                timeout: 120000,
+                timeout: 660000,
+                protocolTimeout: 660000, // 11 minutes Puppeteer timeout
                 defaultViewport: null,
                 bypassCSP: true,
                 userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
@@ -867,18 +849,12 @@ const initializeClient = async () => {
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage',
-                    '--disable-accelerated-2d-canvas',
-                    '--no-first-run',
-                    '--no-zygote',
                     '--disable-gpu',
-                    '--enable-features=NetworkService,NetworkServiceInProcess',
-                    '--disable-web-security',
                     '--disable-extensions',
                     '--disable-background-timer-throttling',
                     '--disable-backgrounding-occluded-windows',
                     '--disable-renderer-backgrounding',
-                    '--hide-scrollbars',
-                    '--mute-audio'
+                    '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
                 ]
             }
         });
@@ -1144,6 +1120,16 @@ const initializeClient = async () => {
 
         try {
             client.initialize().catch(async err => {
+                if (
+                    err.message && (
+                        err.message.includes('Execution context was destroyed') ||
+                        err.message.includes('most likely because of a navigation') ||
+                        err.message.includes('detached Frame')
+                    )
+                ) {
+                    console.warn('⚠️ Safe notice: Post-navigation context notice during QR -> Inbox redirect. Keeping client intact:', err.message);
+                    return;
+                }
                 console.error('Failed to initialize WhatsApp client (catch path):', err.message);
                 clientStatus = 'DISCONNECTED';
                 io.emit('status', { status: clientStatus, qr: null });
@@ -1155,15 +1141,25 @@ const initializeClient = async () => {
                 } catch (e) {}
             });
         } catch (err) {
-            console.error('Graceful Exception in client.initialize():', err.message);
-            clientStatus = 'DISCONNECTED';
-            io.emit('status', { status: clientStatus, qr: null });
-            try {
-                if (client) {
-                    client.destroy().catch(() => { });
-                    client = null;
-                }
-            } catch (e) {}
+            if (
+                err.message && (
+                    err.message.includes('Execution context was destroyed') ||
+                    err.message.includes('most likely because of a navigation') ||
+                    err.message.includes('detached Frame')
+                )
+            ) {
+                console.warn('⚠️ Safe notice: Post-navigation context caught in client.initialize() sync block. Keeping client intact.');
+            } else {
+                console.error('Graceful Exception in client.initialize():', err.message);
+                clientStatus = 'DISCONNECTED';
+                io.emit('status', { status: clientStatus, qr: null });
+                try {
+                    if (client) {
+                        client.destroy().catch(() => { });
+                        client = null;
+                    }
+                } catch (e) {}
+            }
         }
 
     } finally {
