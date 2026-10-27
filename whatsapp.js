@@ -26,6 +26,53 @@ app.use(cors({
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+/**
+ * Intelligent Dynamic Phone Normalizer (Shared Helper)
+ */
+function formatToDynamicWhatsAppJID(rawNumber, countryCode = '') {
+    if (!rawNumber) return null;
+
+    // 1. Strip all non-digit characters except leading '+'
+    let raw = rawNumber.toString().trim();
+    const hasLeadingPlus = raw.startsWith('+');
+    let clean = raw.replace(/\D/g, '');
+
+    if (!clean) return null;
+
+    // 2. Clean provided country code (e.g., '+880' -> '880', '+60' -> '60', '+62' -> '62')
+    let dial = (countryCode || '').toString().replace(/\D/g, '');
+
+    // 3. Strip international direct dialing prefix '00'
+    if (clean.startsWith('00')) {
+        clean = clean.substring(2);
+    }
+
+    // 4. Intelligent Redundant Zero & Country Code Resolution:
+    if (dial) {
+        // Case A: Number already starts with dial code, but has a redundant zero right after
+        // (e.g., user entered '+880017...' or '880017...' -> dial is '880', remainder starts with '0')
+        if (clean.startsWith(dial)) {
+            const rest = clean.substring(dial.length);
+            if (rest.startsWith('0')) {
+                clean = dial + rest.replace(/^0+/, '');
+            }
+        }
+        // Case B: Number starts with local leading '0' (e.g., '01348178837' or '0123456789')
+        else if (clean.startsWith('0')) {
+            clean = dial + clean.replace(/^0+/, '');
+        }
+        // Case C: Raw national number without leading 0 or dial code (e.g., '1348178837')
+        else if (!clean.startsWith(dial) && !hasLeadingPlus) {
+            clean = dial + clean;
+        }
+    } else {
+        // If no dial code provided, strip any accidental internal double zeros after common 2/3-digit prefixes
+        clean = clean.replace(/^0+/, '');
+    }
+
+    return clean;
+}
+
 app.get('/api/whatsapp/profile-pic/:chatId', async (req, res) => {
     try {
         if (!client || clientStatus !== 'READY') return res.json({ url: null });
@@ -663,20 +710,16 @@ const syncChats = async (targetEmitter) => {
         try {
             allChats = await client.getChats();
         } catch (getChatsErr) {
-            if (
-                getChatsErr.message && (
-                    getChatsErr.message.includes('Execution context was destroyed') ||
-                    getChatsErr.message.includes('most likely because of a navigation') ||
-                    getChatsErr.message.includes('detached Frame')
-                )
-            ) {
-                console.warn('⚠️ Safe notice: Post-navigation context notice during getChats. Retrying in 3s...');
-                await delay(3000);
+            console.warn(`⚠️ [syncChats Notice] getChats notice: ${getChatsErr?.message || getChatsErr}. Retrying in 3s...`);
+            await delay(3000);
+            try {
                 if (client && clientStatus === 'READY') {
-                    allChats = await client.getChats().catch(() => []);
+                    allChats = await client.getChats();
                 }
-            } else {
-                throw getChatsErr;
+            } catch (retryErr) {
+                console.warn(`⚠️ [syncChats Notice] getChats retry failed: ${retryErr?.message || retryErr}. Safely returning empty array.`);
+                allChats = [];
+                return [];
             }
         }
 
@@ -735,8 +778,8 @@ const syncChats = async (targetEmitter) => {
         targetEmitter.emit('whatsapp_chats_loaded', top20Chats);
         console.log(`✅ Emitted top ${top20Chats.length} chats instantly (chunked, zero-async).`);
     } catch (err) {
-        console.error('Error in syncChats:', err.message);
-        handleDetachedFrameError(err);
+        console.warn('⚠️ Safe warning in syncChats (suppressed):', err?.message || err);
+        return [];
     } finally {
         isSyncing = false;
     }
@@ -929,14 +972,18 @@ const initializeClient = async () => {
             // Cancel the auth→ready watchdog
             if (readyTimeoutId) { clearTimeout(readyTimeoutId); readyTimeoutId = null; }
             clientStatus = 'READY';
-            console.log('WhatsApp Client is ready!');
+            console.log('WhatsApp Client is ready! Waiting 5s for internal stores to hydrate...');
             io.emit('whatsapp_ready');
-
-            // Fetch and sync chats immediately to frontend on ready
-            syncChats(io);
-            emitProfile(io);
-
             io.emit('status', { status: clientStatus, qr: null });
+
+            // Wait 5 seconds after client initialization before calling syncChats to allow WhatsApp Web internal stores to hydrate
+            setTimeout(() => {
+                if (clientStatus === 'READY') {
+                    console.log('Internal store hydration complete. Triggering syncChats & emitProfile...');
+                    syncChats(io);
+                    emitProfile(io);
+                }
+            }, 5000);
         });
 
         // Consolidated listener for ALL messages (incoming, outgoing from phone, and auto-replies)
@@ -1342,62 +1389,86 @@ app.post('/api/whatsapp/send', async (req, res) => {
         return res.status(400).json({ error: 'WhatsApp client is not ready. Status: ' + clientStatus });
     }
 
-    const { phone, message } = req.body;
+    const { phone, to, message, messageText, countryCode } = req.body;
+    const targetPhone = to || phone;
+    const textToSend = messageText || message;
 
-    if (!phone || !message) {
+    if (!targetPhone || !textToSend) {
         return res.status(400).json({ error: 'Phone and message are required.' });
     }
 
     try {
-        const chatId = phone.includes('@') ? phone : (() => {
-            let formattedPhone = phone.replace(/\D/g, '');
-            // Only prepend 880 if it's a local Bangladeshi 11-digit mobile starting with 01
-            if (formattedPhone.startsWith('01') && formattedPhone.length === 11) {
-                formattedPhone = '880' + formattedPhone.substring(1);
-            }
-            return `${formattedPhone}@c.us`;
-        })();
+        const defaultCompanyCountryCode = '880';
+        const formattedNumber = formatToDynamicWhatsAppJID(targetPhone, countryCode || defaultCompanyCountryCode);
+        if (!formattedNumber) {
+            throw new Error(`Invalid phone number provided: ${targetPhone}`);
+        }
 
-        const sentMsg = await client.sendMessage(chatId, message);
+        // 1. Resolve real WhatsApp JID / LID dynamically
+        let targetJid = `${formattedNumber}@c.us`;
+        try {
+            const numberDetails = await client.getNumberId(formattedNumber);
+            if (numberDetails && numberDetails._serialized) {
+                targetJid = numberDetails._serialized;
+            }
+        } catch (lidErr) {
+            console.warn(`[LID Resolution Notice] getNumberId failed for ${formattedNumber}, falling back to ${targetJid}`);
+        }
+
+        // 2. Simulate human presence
+        try {
+            await client.sendPresenceAvailable();
+            const chat = await client.getChatById(targetJid);
+            if (chat && typeof chat.sendStateTyping === 'function') {
+                await chat.sendStateTyping();
+                await new Promise((res) => setTimeout(res, 2000));
+            }
+        } catch (presErr) {
+            // Gracefully bypass if typing simulation fails on new chats
+        }
+
+        // 3. Send message and safely extract response properties
+        const sentMsg = await client.sendMessage(targetJid, textToSend);
+        const messageId = sentMsg?.id?._serialized || sentMsg?.id?.id || 'SENT_OK';
 
         io.emit('new_message', {
-            id: sentMsg.id.id,
-            body: message,
+            id: messageId,
+            body: textToSend,
             timestamp: Date.now(),
             fromMe: true,
-            sender: chatId
+            sender: targetJid
         });
 
         // Write to messages collection in Firestore for sent message
-        await writeToFirestore('messages', {
-            id: sentMsg.id.id,
-            threadId: chatId,
-            body: message,
+        writeToFirestore('messages', {
+            id: messageId,
+            threadId: targetJid,
+            body: textToSend,
             fromMe: true,
             timestamp: Date.now(),
             companyId: 'DEFAULT'
-        });
+        }).catch(() => {});
 
         // Update thread in Firestore for sent message
         try {
-            const chat = await sentMsg.getChat();
-            await upsertFirestore('whatsapp_threads', chatId, {
-                id: chatId,
-                name: chat.name || chat.id.user || '',
+            const chat = await sentMsg.getChat().catch(() => null);
+            await upsertFirestore('whatsapp_threads', targetJid, {
+                id: targetJid,
+                name: chat?.name || chat?.id?.user || formattedNumber,
                 unreadCount: 0,
                 timestamp: Date.now(),
-                lastMessage: message,
-                isGroup: chat.isGroup || false,
+                lastMessage: textToSend,
+                isGroup: chat?.isGroup || false,
                 companyId: 'DEFAULT'
             });
         } catch (err) {
             console.error('Failed to update thread on outgoing message:', err.message);
         }
 
-        res.json({ success: true, message: 'Message sent successfully.' });
+        return res.json({ success: true, messageId, message: 'Message sent successfully.' });
     } catch (error) {
         console.error('Error sending message:', error);
-        res.status(500).json({ error: 'Failed to send message: ' + error.message });
+        return res.status(500).json({ error: 'Failed to send message: ' + error.message });
     }
 });
 
@@ -1409,19 +1480,41 @@ app.post('/api/whatsapp/send-media', async (req, res) => {
         return res.status(400).json({ error: 'WhatsApp client is not ready. Status: ' + clientStatus });
     }
 
-    const { phone, base64, mediaUrl, mimetype, filename, caption } = req.body;
-    if (!phone || (!base64 && !mediaUrl)) {
+    const { phone, to, base64, mediaUrl, mimetype, filename, caption, countryCode } = req.body;
+    const targetPhone = to || phone;
+    if (!targetPhone || (!base64 && !mediaUrl)) {
         return res.status(400).json({ error: 'phone, and either base64 or mediaUrl are required.' });
     }
 
     try {
-        const chatId = phone.includes('@') ? phone : (() => {
-            let formattedPhone = phone.replace(/\D/g, '');
-            if (formattedPhone.startsWith('01') && formattedPhone.length === 11) {
-                formattedPhone = '880' + formattedPhone.substring(1);
+        const defaultCompanyCountryCode = '880';
+        const formattedNumber = formatToDynamicWhatsAppJID(targetPhone, countryCode || defaultCompanyCountryCode);
+        if (!formattedNumber) {
+            throw new Error(`Invalid phone number provided: ${targetPhone}`);
+        }
+
+        // 1. Resolve real WhatsApp JID / LID dynamically
+        let targetJid = `${formattedNumber}@c.us`;
+        try {
+            const numberDetails = await client.getNumberId(formattedNumber);
+            if (numberDetails && numberDetails._serialized) {
+                targetJid = numberDetails._serialized;
             }
-            return `${formattedPhone}@c.us`;
-        })();
+        } catch (lidErr) {
+            console.warn(`[LID Resolution Notice] getNumberId failed for ${formattedNumber}, falling back to ${targetJid}`);
+        }
+
+        // 2. Simulate human presence
+        try {
+            await client.sendPresenceAvailable();
+            const chat = await client.getChatById(targetJid);
+            if (chat && typeof chat.sendStateTyping === 'function') {
+                await chat.sendStateTyping();
+                await new Promise((res) => setTimeout(res, 2000));
+            }
+        } catch (presErr) {
+            // Gracefully bypass if typing simulation fails on new chats
+        }
 
         let media;
         if (mediaUrl) {
@@ -1430,18 +1523,19 @@ app.post('/api/whatsapp/send-media', async (req, res) => {
             media = new MessageMedia(mimetype, base64, filename || 'attachment');
         }
 
-        const sentMsg = await client.sendMessage(chatId, media, { caption });
+        const sentMsg = await client.sendMessage(targetJid, media, { caption });
+        const messageId = sentMsg?.id?._serialized || sentMsg?.id?.id || 'SENT_OK';
 
         const actualMimetype = mimetype || media.mimetype;
         const actualType = actualMimetype.split('/')[0];
         const payload = {
-            id: sentMsg.id.id,
-            threadId: chatId,
+            id: messageId,
+            threadId: targetJid,
             body: caption || filename || 'Media',
             type: actualType,
             mimetype: actualMimetype,
             filename: filename || media.filename,
-            mediaUrl: mediaUrl || `data:${actualMimetype};base64,${base64.substring(0, 50)}...`, // Truncated to avoid giant docs if base64
+            mediaUrl: mediaUrl || `data:${actualMimetype};base64,${base64 ? base64.substring(0, 50) : ''}...`,
             timestamp: Date.now(),
             fromMe: true,
             companyId: 'DEFAULT'
@@ -1449,16 +1543,16 @@ app.post('/api/whatsapp/send-media', async (req, res) => {
 
         io.emit('new_message', {
             ...payload,
-            sender: chatId
+            sender: targetJid
         });
 
         // Save media to messages collection in Firestore
-        await writeToFirestore('messages', payload);
+        writeToFirestore('messages', payload).catch(() => {});
 
-        res.json({ success: true, message: 'Media sent successfully.' });
+        return res.json({ success: true, messageId, message: 'Media sent successfully.' });
     } catch (error) {
         console.error('Error sending media:', error);
-        res.status(500).json({ error: 'Failed to send media: ' + error.message });
+        return res.status(500).json({ error: 'Failed to send media: ' + error.message });
     }
 });
 
@@ -2228,13 +2322,22 @@ const processBulkMessageDispatch = async (payload) => {
             continue;
         }
 
-        let formattedPhone = item.phone.replace(/\D/g, '');
-        if (formattedPhone.startsWith('01') && formattedPhone.length === 11) {
-            formattedPhone = '880' + formattedPhone.substring(1);
-        } else if (formattedPhone.startsWith('01')) {
-            formattedPhone = '88' + formattedPhone;
+        const countryCode = item.countryCode || customer?.countryCode || '880';
+        const formattedNumber = formatToDynamicWhatsAppJID(item.phone, countryCode);
+        if (!formattedNumber) {
+            console.warn(`⚠️ [Bulk Dispatch] Recipient item ${i + 1} (${item.phone}) could not be normalized. Skipping...`);
+            continue;
         }
-        const chatId = `${formattedPhone}@c.us`;
+
+        let targetJid = `${formattedNumber}@c.us`;
+        try {
+            const numberDetails = await client.getNumberId(formattedNumber);
+            if (numberDetails && numberDetails._serialized) {
+                targetJid = numberDetails._serialized;
+            }
+        } catch (lidErr) {
+            console.warn(`[LID Resolution Notice] getNumberId failed for ${formattedNumber}, falling back to ${targetJid}`);
+        }
 
         // Format message text
         let finalMsg = item.customMessage || message || '';
@@ -2266,15 +2369,15 @@ const processBulkMessageDispatch = async (payload) => {
 
         // 4. TYPING SIMULATION (Simulate human presence and typing before sending)
         console.log(`\n--------------------------------------------------------`);
-        console.log(`📤 Preparing message ${i + 1}/${itemsToProcess.length} for ${formattedPhone}...`);
+        console.log(`📤 Preparing message ${i + 1}/${itemsToProcess.length} for ${formattedNumber} (${targetJid})...`);
         let chatInstance = null;
         try {
             console.log(`🟢 [Presence] Sending online presence...`);
             await client.sendPresenceAvailable().catch(() => {});
 
-            chatInstance = await client.getChatById(chatId).catch(() => null);
+            chatInstance = await client.getChatById(targetJid).catch(() => null);
             if (chatInstance) {
-                console.log(`✍️  [Typing Simulation] Sending typing state to ${chatId}...`);
+                console.log(`✍️  [Typing Simulation] Sending typing state to ${targetJid}...`);
                 await chatInstance.sendStateTyping().catch(() => {});
             }
 
@@ -2283,14 +2386,14 @@ const processBulkMessageDispatch = async (payload) => {
             console.log(`⏳ [Typing Simulation] Simulating human typing for ${typingDurationSec} seconds before dispatch...`);
             await delay(typingDurationSec * 1000);
         } catch (simErr) {
-            console.warn(`⚠️ [Typing Simulation] Notice for ${chatId}:`, simErr.message);
+            console.warn(`⚠️ [Typing Simulation] Notice for ${targetJid}:`, simErr.message);
         }
 
         // Execute message dispatch
         try {
-            const sentMsg = await client.sendMessage(chatId, finalMsg);
+            const sentMsg = await client.sendMessage(targetJid, finalMsg);
             sentCount++;
-            console.log(`✅ [Dispatched #${sentCount}] Message sent successfully to ${formattedPhone} (Ref: ${hash})`);
+            console.log(`✅ [Dispatched #${sentCount}] Message sent successfully to ${formattedNumber} (Ref: ${hash})`);
 
             // Clear typing state after send
             if (chatInstance) {
@@ -2316,7 +2419,7 @@ const processBulkMessageDispatch = async (payload) => {
             // Write to messages collection in Firestore
             writeToFirestore('messages', {
                 id: sentMsg.id.id,
-                threadId: chatId,
+                threadId: targetJid,
                 body: finalMsg,
                 fromMe: true,
                 timestamp: Date.now(),
@@ -2325,8 +2428,8 @@ const processBulkMessageDispatch = async (payload) => {
 
             // Update thread in Firestore
             if (chatInstance) {
-                upsertFirestore('whatsapp_threads', chatId, {
-                    id: chatId,
+                upsertFirestore('whatsapp_threads', targetJid, {
+                    id: targetJid,
                     name: chatInstance.name || chatInstance.id.user || '',
                     unreadCount: 0,
                     timestamp: Date.now(),
@@ -2336,7 +2439,7 @@ const processBulkMessageDispatch = async (payload) => {
                 }).catch(() => {});
             }
         } catch (sendErr) {
-            console.error(`❌ [Bulk Dispatch Error] Failed to send message to ${chatId}:`, sendErr.message);
+            console.error(`❌ [Bulk Dispatch Error] Failed to send message to ${targetJid}:`, sendErr.message);
         }
 
         // Break & Delay Scheduling (Only if more messages remain in queue)
@@ -2361,15 +2464,16 @@ const processBulkMessageDispatch = async (payload) => {
             }
             // 1. DYNAMIC WAVE DELAY WITH JITTER (Between individual messages)
             else {
-                // Cycle through base delay pattern [15, 20, 25, 25, 20, 15]
-                const waveIndex = (sentCount - 1) % wavePattern.length;
-                const baseDelaySec = wavePattern[waveIndex];
+                // For message index i, calculate baseDelay = wavePattern[i % wavePattern.length]
+                const baseDelay = wavePattern[i % wavePattern.length];
 
-                // Random jitter of -3 to +4 seconds
-                const jitterSec = Math.floor(Math.random() * (4 - (-3) + 1)) + (-3); // -3, -2, -1, 0, 1, 2, 3, 4
-                const finalDelaySec = Math.max(5, baseDelaySec + jitterSec);
+                // Apply random jitter: jitter = Math.floor(Math.random() * 6) - 2 (-2s to +3s)
+                const jitter = Math.floor(Math.random() * 6) - 2;
 
-                console.log(`🌊 [Wave Delay] Message #${sentCount} sent. Base delay: ${baseDelaySec}s | Jitter: ${jitterSec >= 0 ? '+' : ''}${jitterSec}s => Next message in ${finalDelaySec}s...`);
+                // Set wait interval: Math.max(10, baseDelay + jitter) * 1000 ms
+                const finalDelaySec = Math.max(10, baseDelay + jitter);
+
+                console.log(`🌊 [Wave Delay] Message index ${i} (#${sentCount}) sent. Base delay: ${baseDelay}s | Jitter: ${jitter >= 0 ? '+' : ''}${jitter}s => Next message in ${finalDelaySec}s...`);
                 await delay(finalDelaySec * 1000);
             }
         }
